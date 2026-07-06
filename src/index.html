@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Puzzle Solver</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 90%;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5em;
+            background: linear-gradient(90deg, #f7931a, #ffcc00);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .stat-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-label {
+            font-size: 0.9em;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+        .stat-value {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #f7931a;
+        }
+        .target-address {
+            font-size: 0.8em;
+            word-break: break-all;
+            color: #888;
+            margin-top: 20px;
+        }
+        .status {
+            text-align: center;
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .status.searching {
+            background: rgba(247, 147, 26, 0.3);
+            animation: pulse 2s infinite;
+        }
+        .status.found {
+            background: rgba(0, 255, 0, 0.3);
+        }
+        .found-key {
+            background: rgba(0, 255, 0, 0.2);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            display: none;
+        }
+        .found-key.visible {
+            display: block;
+        }
+        .found-key h3 {
+            color: #0f0;
+            margin-bottom: 10px;
+        }
+        .found-key .key {
+            font-family: monospace;
+            font-size: 1.2em;
+            word-break: break-all;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .bitcoin-icon {
+            text-align: center;
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="bitcoin-icon">&#8383;</div>
+        <h1>BTC Puzzle Solver</h1>
+        
+        <div class="grid">
+            <div class="stat-box">
+                <div class="stat-label">Keys Checked</div>
+                <div class="stat-value" id="total">0</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Keys/sec</div>
+                <div class="stat-value" id="kps">0</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Elapsed</div>
+                <div class="stat-value" id="elapsed">0s</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-label">Status</div>
+                <div class="stat-value" id="status-text">Starting...</div>
+            </div>
+        </div>
+
+        <div class="target-address">
+            Target: 1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU
+        </div>
+
+        <div class="status searching" id="status">
+            Searching...
+        </div>
+
+        <div class="found-key" id="found-key">
+            <h3>PRIVATE KEY FOUND!</h3>
+            <div class="key" id="key-value"></div>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket(`ws://${window.location.host}/ws`);
+        const totalEl = document.getElementById('total');
+        const kpsEl = document.getElementById('kps');
+        const elapsedEl = document.getElementById('elapsed');
+        const statusEl = document.getElementById('status');
+        const statusTextEl = document.getElementById('status-text');
+        const foundKeyEl = document.getElementById('found-key');
+        const keyValueEl = document.getElementById('key-value');
+
+        function formatNumber(num) {
+            if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+            if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+            if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+            return num.toString();
+        }
+
+        function formatTime(secs) {
+            if (secs < 60) return Math.floor(secs) + 's';
+            if (secs < 3600) return Math.floor(secs / 60) + 'm ' + Math.floor(secs % 60) + 's';
+            return Math.floor(secs / 3600) + 'h ' + Math.floor((secs % 3600) / 60) + 'm';
+        }
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'stats') {
+                totalEl.textContent = formatNumber(data.total);
+                kpsEl.textContent = formatNumber(data.kps);
+                elapsedEl.textContent = formatTime(data.elapsed);
+                statusTextEl.textContent = 'Searching...';
+            } else if (data.type === 'found') {
+                statusEl.className = 'status found';
+                statusEl.textContent = 'FOUND!';
+                statusTextEl.textContent = 'FOUND!';
+                foundKeyEl.className = 'found-key visible';
+                keyValueEl.textContent = data.key;
+            }
+        };
+
+        ws.onclose = () => {
+            statusTextEl.textContent = 'Disconnected';
+            statusEl.className = 'status';
+        };
+    </script>
+</body>
+</html>
