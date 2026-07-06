@@ -191,6 +191,10 @@ fn solver_worker(stats: Stats, tx: broadcast::Sender<String>, thread_id: u32) {
                     sample_hex,
                     address
                 );
+                let _ = tx.send(format!(
+                    "{{\"type\":\"sample\",\"thread\":{},\"milestone\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
+                    thread_id, next_sample / SAMPLE_EVERY, sample_hex, address
+                ));
             }
         }
 

@@ -5,11 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BTC Puzzle Solver</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
@@ -17,16 +13,16 @@
             min-height: 100vh;
             display: flex;
             justify-content: center;
-            align-items: center;
+            padding: 20px;
         }
         .container {
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255,255,255,0.1);
             backdrop-filter: blur(10px);
             border-radius: 20px;
             padding: 40px;
-            max-width: 600px;
-            width: 90%;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
         }
         h1 {
             text-align: center;
@@ -37,80 +33,64 @@
             -webkit-text-fill-color: transparent;
         }
         .stat-box {
-            background: rgba(0, 0, 0, 0.3);
+            background: rgba(0,0,0,0.3);
             border-radius: 10px;
             padding: 20px;
             margin-bottom: 20px;
         }
-        .stat-label {
-            font-size: 0.9em;
-            color: #aaa;
-            margin-bottom: 5px;
-        }
-        .stat-value {
-            font-size: 1.8em;
-            font-weight: bold;
-            color: #f7931a;
-        }
-        .target-address {
-            font-size: 0.8em;
-            word-break: break-all;
-            color: #888;
-            margin-top: 20px;
-        }
+        .stat-label { font-size: 0.9em; color: #aaa; margin-bottom: 5px; }
+        .stat-value { font-size: 1.8em; font-weight: bold; color: #f7931a; }
+        .target-address { font-size: 0.8em; word-break: break-all; color: #888; margin-top: 20px; }
         .status {
             text-align: center;
             margin-top: 20px;
             padding: 10px;
             border-radius: 5px;
         }
-        .status.searching {
-            background: rgba(247, 147, 26, 0.3);
-            animation: pulse 2s infinite;
-        }
-        .status.found {
-            background: rgba(0, 255, 0, 0.3);
-        }
+        .status.searching { background: rgba(247,147,26,0.3); animation: pulse 2s infinite; }
+        .status.found { background: rgba(0,255,0,0.3); }
         .found-key {
-            background: rgba(0, 255, 0, 0.2);
+            background: rgba(0,255,0,0.2);
             border-radius: 10px;
             padding: 20px;
             margin-top: 20px;
             display: none;
         }
-        .found-key.visible {
-            display: block;
+        .found-key.visible { display: block; }
+        .found-key h3 { color: #0f0; margin-bottom: 10px; }
+        .found-key .key { font-family: monospace; font-size: 1.2em; word-break: break-all; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .bitcoin-icon { text-align: center; font-size: 4em; margin-bottom: 20px; }
+        .samples {
+            background: rgba(0,0,0,0.4);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
         }
-        .found-key h3 {
-            color: #0f0;
-            margin-bottom: 10px;
-        }
-        .found-key .key {
+        .samples h3 { color: #f7931a; margin-bottom: 10px; font-size: 1em; }
+        .sample-entry {
             font-family: monospace;
-            font-size: 1.2em;
+            font-size: 0.85em;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 6px;
+            border-left: 3px solid #f7931a;
             word-break: break-all;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-        .grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-        .bitcoin-icon {
-            text-align: center;
-            font-size: 4em;
-            margin-bottom: 20px;
-        }
+        .sample-entry .label { color: #888; }
+        .sample-entry .key { color: #ffcc00; }
+        .sample-entry .addr { color: #0f0; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="bitcoin-icon">&#8383;</div>
         <h1>BTC Puzzle Solver</h1>
-        
+
         <div class="grid">
             <div class="stat-box">
                 <div class="stat-label">Keys Checked</div>
@@ -134,13 +114,15 @@
             Target: 1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU
         </div>
 
-        <div class="status searching" id="status">
-            Searching...
-        </div>
+        <div class="status searching" id="status">Searching...</div>
 
         <div class="found-key" id="found-key">
             <h3>PRIVATE KEY FOUND!</h3>
             <div class="key" id="key-value"></div>
+        </div>
+
+        <div class="samples" id="samples">
+            <h3>Sample Keys (every 1M)</h3>
         </div>
     </div>
 
@@ -149,10 +131,11 @@
         const totalEl = document.getElementById('total');
         const kpsEl = document.getElementById('kps');
         const elapsedEl = document.getElementById('elapsed');
-        const statusEl = document.getElementById('status');
         const statusTextEl = document.getElementById('status-text');
+        const statusEl = document.getElementById('status');
         const foundKeyEl = document.getElementById('found-key');
         const keyValueEl = document.getElementById('key-value');
+        const samplesEl = document.getElementById('samples');
 
         function formatNumber(num) {
             if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
@@ -169,7 +152,7 @@
 
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            
+
             if (data.type === 'stats') {
                 totalEl.textContent = formatNumber(data.total);
                 kpsEl.textContent = formatNumber(data.kps);
@@ -180,7 +163,16 @@
                 statusEl.textContent = 'FOUND!';
                 statusTextEl.textContent = 'FOUND!';
                 foundKeyEl.className = 'found-key visible';
-                keyValueEl.textContent = data.key;
+                keyValueEl.textContent = `Key: ${data.key}\nAddress: ${data.address}`;
+            } else if (data.type === 'sample') {
+                const entry = document.createElement('div');
+                entry.className = 'sample-entry';
+                entry.innerHTML = `<span class="label">~${data.milestone}M T${data.thread}</span> <span class="key">Key: ${data.key}</span> <span class="addr">Addr: ${data.address}</span>`;
+                samplesEl.appendChild(entry);
+                samplesEl.scrollTop = samplesEl.scrollHeight;
+                if (samplesEl.children.length > 50) {
+                    samplesEl.removeChild(samplesEl.children[1]);
+                }
             }
         };
 
