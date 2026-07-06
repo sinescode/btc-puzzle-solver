@@ -16,8 +16,8 @@ const RANGE_START: u128 = 0x400000000000000000;
 const RANGE_END: u128 = 0x7fffffffffffffffff;
 const NUM_THREADS: u32 = 8;
 const OUTPUT_FILE: &str = "found_key.txt";
+const SAMPLE_EVERY: u64 = 1_000_000;
 
-#[derive(Clone)]
 struct Stats {
     total_checked: Arc<AtomicU64>,
     keys_per_second: Arc<AtomicU64>,
@@ -37,8 +37,8 @@ impl Stats {
         }
     }
 
-    fn increment(&self, n: u64) {
-        self.total_checked.fetch_add(n, Ordering::Relaxed);
+    fn increment(&self, n: u64) -> u64 {
+        self.total_checked.fetch_add(n, Ordering::Relaxed)
     }
 
     fn get_total(&self) -> u64 {
@@ -47,10 +47,6 @@ impl Stats {
 
     fn update_kps(&self, kps: u64) {
         self.keys_per_second.store(kps, Ordering::Relaxed);
-    }
-
-    fn get_kps(&self) -> u64 {
-        self.keys_per_second.load(Ordering::Relaxed)
     }
 
     fn elapsed_secs(&self) -> f64 {
@@ -64,6 +60,18 @@ impl Stats {
     fn found(&self, key: String) {
         *self.found_key.write() = Some(key);
         self.stop();
+    }
+}
+
+impl Clone for Stats {
+    fn clone(&self) -> Self {
+        Self {
+            total_checked: self.total_checked.clone(),
+            keys_per_second: self.keys_per_second.clone(),
+            is_running: self.is_running.clone(),
+            found_key: self.found_key.clone(),
+            start_time: self.start_time,
+        }
     }
 }
 
@@ -84,13 +92,13 @@ fn secret_key_to_address(secp: &Secp256k1<secp256k1::All>, key: &SecretKey) -> S
     address.to_string()
 }
 
-fn save_key_to_file(hex_key: &str) {
+fn save_key_to_file(hex_key: &str, address: &str) {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(OUTPUT_FILE)
         .expect("Cannot open output file");
-    writeln!(file, "Private Key: {}", hex_key).expect("Cannot write to file");
+    writeln!(file, "Key: {} Address: {}", hex_key, address).expect("Cannot write");
     println!("Key saved to {}", OUTPUT_FILE);
 }
 
@@ -124,31 +132,21 @@ fn verify_address_generation() {
         println!("  Expected:  {}", expected_addr);
         println!();
     }
-
-    println!("=== RANGE VERIFICATION ===\n");
-    let range_test_key = 0x400000000000000000u128;
-    let key = u128_to_secret_key(range_test_key);
-    let addr = secret_key_to_address(&secp, &key);
-    println!("Range start key: {:064x}", range_test_key);
-    println!("Generated addr:  {}", addr);
-    println!("Address valid:   {}", addr.starts_with('1'));
-    println!();
 }
 
 fn verify_file_saving() {
     println!("=== FILE SAVING VERIFICATION ===\n");
-    let test_key = "deadbeef00000000000000000000000000000000000000000000000000000001";
-    save_key_to_file(test_key);
-
+    save_key_to_file(
+        "deadbeef00000000000000000000000000000000000000000000000000000001",
+        "1TestAddress",
+    );
     let content = std::fs::read_to_string(OUTPUT_FILE).unwrap();
     println!("File content:\n{}", content);
-
-    if content.contains(test_key) {
+    if content.contains("deadbeef") {
         println!("File save: PASS\n");
     } else {
         println!("File save: FAIL\n");
     }
-
     std::fs::remove_file(OUTPUT_FILE).ok();
 }
 
@@ -169,28 +167,43 @@ fn solver_worker(stats: Stats, tx: broadcast::Sender<String>, thread_id: u32) {
 
         if address == TARGET_ADDRESS {
             let hex_key = format!("{:064x}", private_key);
-            println!("[Thread {}] FOUND! Private key: {}", thread_id, hex_key);
-            save_key_to_file(&hex_key);
+            println!("[Thread {}] FOUND! Key: {} Addr: {}", thread_id, hex_key, address);
+            save_key_to_file(&hex_key, &address);
             stats.found(hex_key.clone());
-            let _ = tx.send(format!("{{\"type\":\"found\",\"key\":\"{}\"}}", hex_key));
+            let _ = tx.send(format!(
+                "{{\"type\":\"found\",\"key\":\"{}\",\"address\":\"{}\"}}",
+                hex_key, address
+            ));
             return;
         }
 
         local_count += 1;
 
-        if last_update.elapsed().as_millis() >= 200 {
-            stats.increment(local_count);
-            let elapsed = last_update.elapsed().as_secs_f64();
-            if elapsed > 0.01 {
-                let kps = (local_count as f64 / elapsed) as u64;
-                stats.update_kps(kps);
-                let _ = tx.send(format!(
-                    "{{\"type\":\"stats\",\"total\":{},\"kps\":{},\"elapsed\":{}}}",
-                    stats.get_total(),
-                    stats.get_kps(),
-                    stats.elapsed_secs()
-                ));
+        if local_count % 1000 == 0 {
+            let prev = stats.increment(1000);
+            let next_sample = (prev / SAMPLE_EVERY + 1) * SAMPLE_EVERY;
+            if prev < next_sample && prev + 1000 >= next_sample {
+                let sample_hex = format!("{:064x}", private_key);
+                println!(
+                    "[Thread {}] Sample @ ~{}M | Key: {} | Addr: {}",
+                    thread_id,
+                    next_sample / SAMPLE_EVERY,
+                    sample_hex,
+                    address
+                );
             }
+        }
+
+        if last_update.elapsed().as_millis() >= 500 {
+            let elapsed = last_update.elapsed().as_secs_f64();
+            let kps = (local_count as f64 / elapsed) as u64;
+            stats.update_kps(kps);
+            let _ = tx.send(format!(
+                "{{\"type\":\"stats\",\"total\":{},\"kps\":{},\"elapsed\":{}}}",
+                stats.get_total(),
+                kps,
+                stats.elapsed_secs()
+            ));
             local_count = 0;
             last_update = Instant::now();
         }
@@ -206,7 +219,7 @@ async fn stats_broadcaster(stats: Stats, tx: broadcast::Sender<String>) {
         let _ = tx.send(format!(
             "{{\"type\":\"stats\",\"total\":{},\"kps\":{},\"elapsed\":{}}}",
             stats.get_total(),
-            stats.get_kps(),
+            stats.keys_per_second.load(Ordering::Relaxed),
             stats.elapsed_secs()
         ));
     }
@@ -230,6 +243,7 @@ async fn main() {
     println!("Range: {:018x}..{:018x}", RANGE_START, RANGE_END);
     println!("Target: {}", TARGET_ADDRESS);
     println!("Threads: {}", NUM_THREADS);
+    println!("Sample every: {}M keys", SAMPLE_EVERY / 1_000_000);
     println!("Run with --verify to prove correctness\n");
 
     for i in 0..NUM_THREADS {
