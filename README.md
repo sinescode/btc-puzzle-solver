@@ -1,8 +1,18 @@
 # BTC Puzzle Solver
 
-Brute-force solver for Bitcoin Puzzle #71 (private key in range `[2^70, 2^71)`).
+Random lottery-scan brute-force solver for Bitcoin Puzzle #71 (private key in range `[2^70, 2^71)`).
 
 **Target:** `1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU` (~6.6 BTC reward)
+
+## Strategy
+
+**Random lottery scan** — each thread independently picks random starting positions
+across the entire 2^70 keyspace, scans a small chunk (2^20 keys ≈ 1M) sequentially
+via fast incremental point addition, then jumps to a new random spot.
+
+This is the mathematical equivalent of buying lottery tickets spread across the
+entire range rather than checking keys in order. Same per-key speed as sequential,
+but random coverage means you might get lucky early.
 
 ## Build & Run
 
@@ -19,18 +29,33 @@ Open `http://127.0.0.1:3030` for the live dashboard (WebSocket).
 
 ## Architecture
 
-- Incremental point addition (`k256` ProjectivePoint += Generator)
-- Batch normalization (`BatchNormalize`) per 8192-key batch
-- Hash160 (SHA-256 + RIPEMD-160) on compressed public keys
-- Deterministic range partitioning across `N` threads (shuffled assignment)
-- Live WebSocket dashboard via `warp`
+- **Random scan**: per-thread PRNG picks random positions in [2^70, 2^71)
+- **Fast sequential chunks**: incremental point addition (`P += G`) within each chunk
+- **Batch normalization**: every 65536 keys, batch-convert projective → affine
+- **Hash160**: SHA-256 + RIPEMD-160 on compressed public keys, with first-byte early exit
+- **Thread pinning**: each worker pinned to a dedicated CPU core (`core_affinity`)
+- **SHA-256 asm**: hardware-accelerated SHA-256 via `sha2/asm` feature (SHA-NI / NEON)
+- **Live dashboard**: warp WebSocket relay with per-thread stats, sample keys, theme toggle
 
-## Key Fixes Applied
+## Dashboard Features
 
-1. **RANGE_END typo** — was `0x7fffffffffffffffff` (2^63-1), corrected to `(1 << 71) - 1` (2^71-1). Previous value was *below* RANGE_START, making the entire search range empty.
-2. **u128-to-usize truncation** — `remaining` computed as `(thread_end - current_key) as usize` silently truncated slice sizes > 2^64 to 0, causing all threads except one to process zero keys per batch. Fixed by computing the `min()` in u128 space before casting.
-3. **kps under-reporting** — each worker overwrote a shared `keys_per_second` atomic with its own rate; dashboard showed 1/N of actual throughput. Fixed with per-window accumulation and centralized kps computation.
-4. **`--verify` assertions** — `verify_address_generation` used print-based pass/fail instead of `assert_eq!`, silently hiding mismatches.
-5. **File permissions** — `found_key.txt` now created with mode `0600` on Unix.
-6. **Panic on bad address** — `hash160_from_address` returns `Result` instead of panicking.
-7. **Dead code removed** — unused `take_found_event` method.
+- Real-time keys checked, KPS, elapsed time
+- Estimated keyspace coverage percentage
+- Lottery ticket counter (random chunks attempted)
+- Per-thread KPS cards
+- Sample keys with one-click copy
+- Dark/light theme toggle (persisted)
+- Desktop notification on key found
+- Auto-reconnect on disconnect
+
+## Key Fixes (v0.2)
+
+1. **Random scan** — replaced sequential range partition with per-thread random lottery
+2. **Graceful shutdown** — process exits cleanly when key is found (no more infinite hang)
+3. **KPS computation** — race-free: broadcaster computes KPS from total deltas, no atomic resets
+4. **Sample key accuracy** — reports actual batch-start keys, not estimated midpoints
+5. **Thread pinning** — eliminates cache migration between cores
+6. **Larger batches** — 65536 keys/batch (was 8192), better L3 cache amortization
+7. **SIMD SHA-256** — `sha2/asm` feature for hardware-accelerated hashing
+8. **File permissions** — `found_key.txt` created with mode `0600` on Unix
+9. **Error handling** — `hash160_from_address` returns `Result` instead of panicking

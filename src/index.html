@@ -3,158 +3,303 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>BTC Puzzle Solver</title>
+<title>BTC Puzzle Solver — Random Scan</title>
 <style>
+/* ── Theme ──────────────────────────────────────────── */
 :root{
   --bg:#0f0f1a;--bg2:#1a1a2e;--card:rgba(255,255,255,.03);
-  --accent:#f7931a;--gold:#ffb347;--green:#00d4aa;
+  --accent:#f7931a;--gold:#ffb347;--green:#00d4aa;--red:#ff4757;
   --fg:#fff;--fg2:#8b8ba7;--fg3:#5a5a7a;--line:rgba(255,255,255,.06);
+}
+body.light{
+  --bg:#f5f5fa;--bg2:#fff;--card:rgba(0,0,0,.02);
+  --accent:#e8831a;--gold:#ca7d18;--green:#00a87e;--red:#e04050;
+  --fg:#1a1a2e;--fg2:#5a5a7a;--fg3:#8b8ba7;--line:rgba(0,0,0,.08);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-  background:var(--bg);color:var(--fg);min-height:100vh;display:flex;
-  justify-content:center;align-items:center;padding:24px;line-height:1.5}
-.container{max-width:640px;width:100%}
-.header{text-align:center;margin-bottom:40px}
+  background:var(--bg);color:var(--fg);min-height:100vh;padding:24px;
+  line-height:1.5;transition:background .2s,color .2s}
+.container{max-width:780px;width:100%;margin:0 auto}
+
+/* ── Header ─────────────────────────────────────────── */
+.header{text-align:center;margin-bottom:32px;position:relative}
 .logo{width:56px;height:56px;background:linear-gradient(135deg,var(--accent),var(--gold));
   border-radius:16px;display:flex;align-items:center;justify-content:center;
-  margin:0 auto 20px;font-size:28px;box-shadow:0 0 40px rgba(247,147,26,.15)}
-h1{font-size:1.5em;font-weight:600;letter-spacing:-.02em;margin-bottom:6px}
-.subtitle{color:var(--fg2);font-size:.9em}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px}
-.stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px}
-.stat:hover{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.1)}
-.lbl{font-size:.75em;font-weight:500;text-transform:uppercase;letter-spacing:.05em;
-  color:var(--fg3);margin-bottom:8px}
-.val{font-size:1.6em;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
-.val.orange{color:var(--accent)}.val.green{color:var(--green)}.val.white{color:var(--fg)}
-.bar,.target,.samples{background:var(--card);border:1px solid var(--line);border-radius:12px;
-  padding:14px 20px;margin-bottom:16px}
-.bar{display:flex;align-items:center;gap:12px}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0}
-.dot.searching{animation:pulse 2s infinite}.dot.found{background:var(--green)}
+  margin:0 auto 16px;font-size:28px;box-shadow:0 0 40px rgba(247,147,26,.15)}
+h1{font-size:1.5em;font-weight:600;letter-spacing:-.02em;margin-bottom:4px}
+.subtitle{color:var(--fg2);font-size:.88em}
+.theme-btn{position:absolute;top:4px;right:0;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:8px 12px;cursor:pointer;color:var(--fg2);font-size:.8em;
+  transition:background .15s,color .15s}
+.theme-btn:hover{background:rgba(255,255,255,.06);color:var(--fg)}
+
+/* ── Stat cards ─────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:20px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+.stat:hover{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.08)}
+.lbl{font-size:.72em;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--fg3);margin-bottom:6px}
+.val{font-size:1.5em;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.val.orange{color:var(--accent)}.val.green{color:var(--green)}.val.white{color:var(--fg)}.val.gold{color:var(--gold)}
+
+/* ── Lottery meter ──────────────────────────────────── */
+.lottery-wrap{margin-bottom:16px}
+.lottery-bar{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:16px 20px;display:flex;align-items:center;gap:14px}
+.lottery-icon{font-size:1.6em;flex-shrink:0}
+.lottery-info{flex:1}
+.lottery-title{font-size:.74em;color:var(--fg3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+.lottery-val{font-size:1.2em;font-weight:600;color:var(--gold)}
+.lottery-sub{font-size:.7em;color:var(--fg3);margin-top:2px}
+
+/* ── Status bar ─────────────────────────────────────── */
+.bar{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:14px 20px;margin-bottom:14px}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--accent)}
+.dot.searching{animation:pulse 2s infinite}
+.dot.found{background:var(--green);animation:none}
 .dot.dead{background:var(--fg3);animation:none}
-.target-lbl{font-size:.7em;color:var(--fg3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
-.target-addr{font-family:'SF Mono','Fira Code',monospace;font-size:.82em;color:var(--fg2);
-  word-break:break-all}
+
+/* ── Target ─────────────────────────────────────────── */
+.target{background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:14px 20px;margin-bottom:14px}
+.target-lbl{font-size:.7em;color:var(--fg3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px}
+.target-addr{font-family:'SF Mono','Fira Code',monospace;font-size:.8em;color:var(--fg2);word-break:break-all}
+
+/* ── Found alert ────────────────────────────────────── */
 .found{background:rgba(0,212,170,.08);border:1px solid rgba(0,212,170,.2);border-radius:16px;
   padding:24px;margin-bottom:16px;display:none}
 .found.show{display:block}
-.found h3{color:var(--green);font-size:.85em;text-transform:uppercase;
-  letter-spacing:.05em;margin-bottom:12px}
-.found .k{font-family:'SF Mono','Fira Code',monospace;font-size:.9em;word-break:break-all;
-  line-height:1.8}
-.samples{max-height:320px;overflow-y:auto;padding:20px}
+.found h3{color:var(--green);font-size:.82em;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.found .k{font-family:'SF Mono','Fira Code',monospace;font-size:.88em;word-break:break-all;line-height:1.8}
+
+/* ── Thread cards ───────────────────────────────────── */
+.thread-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:16px}
+.thread-card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.thread-card .tid{font-size:.7em;color:var(--fg3);text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px}
+.thread-card .tkps{font-size:1.1em;font-weight:600;color:var(--accent)}
+
+/* ── Sample keys ────────────────────────────────────── */
+.samples{max-height:360px;overflow-y:auto;background:var(--card);border:1px solid var(--line);
+  border-radius:12px;padding:18px;margin-bottom:16px}
 .samples::-webkit-scrollbar{width:4px}
 .samples::-webkit-scrollbar-thumb{background:var(--fg3);border-radius:2px}
-.samples h3{font-size:.75em;color:var(--fg3);text-transform:uppercase;
-  letter-spacing:.05em;margin-bottom:14px}
-.entry{font-family:'SF Mono','Fira Code',monospace;font-size:.78em;padding:10px 14px;
-  margin-bottom:4px;background:rgba(0,0,0,.2);border-radius:8px;display:flex;
-  flex-wrap:wrap;gap:8px 16px;word-break:break-all}
-.meta{color:var(--fg3);white-space:nowrap}
-.kkey{color:var(--gold)}.kaddr{color:var(--green)}
+.samples h3{font-size:.74em;color:var(--fg3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.entry{font-family:'SF Mono','Fira Code',monospace;font-size:.76em;padding:9px 12px;
+  margin-bottom:4px;background:rgba(0,0,0,.15);border-radius:8px;display:flex;
+  flex-wrap:wrap;align-items:center;gap:8px 14px}
+.meta{color:var(--fg3);white-space:nowrap;flex-shrink:0}
+.kkey{color:var(--gold);word-break:break-all}
+.kaddr{color:var(--green);word-break:break-all;font-size:.9em}
+.copy-btn{background:var(--line);border:none;border-radius:4px;color:var(--fg2);cursor:pointer;
+  font-size:.78em;padding:2px 8px;margin-left:auto;transition:background .15s;white-space:nowrap}
+.copy-btn:hover{background:rgba(255,255,255,.15);color:var(--fg)}
+.copy-btn.copied{background:var(--green);color:#000}
+
+/* ── Animations ─────────────────────────────────────── */
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-@media(max-width:480px){body{padding:16px}.grid{gap:8px}.stat{padding:16px}.val{font-size:1.3em}}
+
+/* ── Responsive ─────────────────────────────────────── */
+@media(max-width:520px){
+  body{padding:12px}
+  .grid{grid-template-columns:1fr 1fr;gap:6px}
+  .stat{padding:14px}
+  .val{font-size:1.2em}
+  .thread-grid{grid-template-columns:1fr 1fr}
+}
 </style>
 </head>
 <body>
 <div class="container">
+  <!-- Header -->
   <div class="header">
-    <div class="logo">&#8383;</div>
+    <button class="theme-btn" id="themeBtn" title="Toggle light/dark theme">🌓 Theme</button>
+    <div class="logo">₿</div>
     <h1>BTC Puzzle Solver</h1>
-    <div class="subtitle">Private key recovery engine</div>
+    <div class="subtitle">Random lottery scan — Puzzle #71 — trust luck 🍀</div>
   </div>
 
+  <!-- Stats grid -->
   <div class="grid">
     <div class="stat"><div class="lbl">Keys Checked</div><div class="val orange" id="total">0</div></div>
     <div class="stat"><div class="lbl">Keys / sec</div><div class="val green" id="kps">0</div></div>
     <div class="stat"><div class="lbl">Elapsed</div><div class="val white" id="elapsed">0s</div></div>
-    <div class="stat"><div class="lbl">Status</div><div class="val white" id="status">Starting…</div></div>
+    <div class="stat"><div class="lbl">Lottery Tickets</div><div class="val gold" id="tickets">0</div></div>
   </div>
 
+  <!-- Lottery meter -->
+  <div class="lottery-wrap">
+    <div class="lottery-bar">
+      <div class="lottery-icon">🎲</div>
+      <div class="lottery-info">
+        <div class="lottery-title">Estimated Coverage</div>
+        <div class="lottery-val" id="coverage">0.00000000%</div>
+        <div class="lottery-sub">Random chunks across 2⁷⁰ keyspace</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Status -->
   <div class="bar">
     <div class="dot searching" id="dot"></div>
-    <div id="msg">Searching for private key…</div>
+    <div id="msg">Drawing random lottery tickets across the keyspace…</div>
   </div>
 
+  <!-- Target -->
   <div class="target">
     <div class="target-lbl">Target Address</div>
-    <div class="target-addr" id="target-addr">—</div>
+    <div class="target-addr" id="targetAddr">1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU</div>
   </div>
 
+  <!-- Found alert -->
   <div class="found" id="found">
-    <h3>Private Key Found</h3>
+    <h3>🎉 Private Key Found!</h3>
     <div class="k" id="key"></div>
   </div>
 
-  <div class="samples">
-    <h3>Sample Keys</h3>
+  <!-- Thread stats -->
+  <div class="thread-grid" id="threadGrid"></div>
+
+  <!-- Sample keys -->
+  <div class="samples" id="samplesWrap">
+    <h3>Sample Keys — Random Positions</h3>
     <div id="samples"></div>
   </div>
 </div>
 
 <script>
+// ── Helpers ──────────────────────────────────────────
 function fmtN(n){
+  if(n>=1e12) return (n/1e12).toFixed(2)+'T';
   if(n>=1e9) return (n/1e9).toFixed(2)+'B';
   if(n>=1e6) return (n/1e6).toFixed(2)+'M';
   if(n>=1e3) return (n/1e3).toFixed(1)+'K';
   return Number(n).toLocaleString();
 }
 function fmtT(s){
-  if(s<60) return Math.floor(s)+'s';
-  if(s<3600) return Math.floor(s/60)+'m '+Math.floor(s%60)+'s';
-  return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  s=Math.floor(s);
+  if(s<60) return s+'s';
+  if(s<3600) return Math.floor(s/60)+'m '+s%60+'s';
+  var h=Math.floor(s/3600), m=Math.floor((s%3600)/60);
+  return h+'h '+m+'m';
 }
-function text(parent, content){
-  const s = document.createElement('span');
-  s.textContent = content;
-  parent.appendChild(s);
-}
-const $ = id => document.getElementById(id);
+var $=function(id){return document.getElementById(id);};
 
-let ws, backoff = 500;
+// ── Theme toggle ─────────────────────────────────────
+(function(){
+  var saved=localStorage.getItem('btc-theme');
+  if(saved==='light') document.body.classList.add('light');
+  $('themeBtn').addEventListener('click',function(){
+    document.body.classList.toggle('light');
+    localStorage.setItem('btc-theme',document.body.classList.contains('light')?'light':'dark');
+  });
+})();
+
+// ── Constants ────────────────────────────────────────
+// Puzzle #71 keyspace size: 2^71 - 1 - 2^70 = 2^70 ≈ 1.18059162e21
+var KEYSPACE = Math.pow(2,70);
+var CHUNK_SIZE = 1048576; // 2^20 keys per random chunk
+
+// ── WebSocket ────────────────────────────────────────
+var ws, backoff=500, notified=false;
+var threadEls={}, sampleCount=0, ticketCount=0, lastTotal=0;
+
 function connect(){
-  ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { backoff = 500; };
-  ws.onmessage = (e) => {
-    let m; try { m = JSON.parse(e.data); } catch { return; }
-    if(m.type === 'stats'){
-      $('total').textContent  = fmtN(m.total);
-      $('kps').textContent    = fmtN(m.kps);
-      $('elapsed').textContent= fmtT(m.elapsed);
-      $('status').textContent = 'Searching…';
-    } else if(m.type === 'found'){
-      $('dot').className = 'dot found';
-      $('msg').innerHTML = '<strong>Key recovered!</strong>';
-      $('status').textContent = 'Found';
-      $('found').className = 'found show';
-      $('key').textContent = `Key: ${m.key}\nAddress: ${m.address || '(see found_key.txt)'}`;
-      $('samples').parentNode.removeChild($('samples').parentNode);
-    } else if(m.type === 'sample'){
-      const row = document.createElement('div');
-      row.className = 'entry';
-      const m1 = document.createElement('span'); m1.className='meta';
-      m1.textContent = `~${m.milestone}M T${m.thread}`;
-      const k = document.createElement('span'); k.className='kkey';
-      k.textContent = m.key;
-      const a = document.createElement('span'); a.className='kaddr';
-      a.textContent = m.address;
-      row.append(m1,k,a);
-      const wrap = $('samples');
-      wrap.appendChild(row); wrap.scrollTop = wrap.scrollHeight;
-      while(wrap.children.length > 40) wrap.removeChild(wrap.firstChild);
+  ws=new WebSocket('ws://'+location.host+'/ws');
+  ws.onopen=function(){
+    backoff=500;
+    $('dot').className='dot searching';
+    $('msg').textContent='Drawing random lottery tickets across the keyspace…';
+  };
+  ws.onmessage=function(e){
+    var m; try{m=JSON.parse(e.data);}catch(ex){return;}
+    switch(m.type){
+
+      case 'stats':
+        $('total').textContent=fmtN(m.total);
+        $('kps').textContent=fmtN(m.kps);
+        $('elapsed').textContent=fmtT(m.elapsed);
+
+        // Count new lottery tickets (one per ~SCAN_CHUNK keys, approximately)
+        var delta=m.total-lastTotal;
+        if(delta>0) ticketCount+=Math.max(1,Math.round(delta/CHUNK_SIZE));
+
+        // Estimate: unique keys checked / keyspace
+        // For random sampling with replacement, use simplified:
+        // coverage ~ keys_checked / keyspace (close enough at this scale)
+        var cov=(m.total/KEYSPACE*100);
+        $('coverage').textContent=cov>0.0001 ? cov.toFixed(7)+'%' : cov.toExponential(4)+'%';
+        $('tickets').textContent=fmtN(ticketCount);
+        lastTotal=m.total;
+        break;
+
+      case 'thread_stats':
+        var grid=$('threadGrid');
+        (m.threads||[]).forEach(function(t){
+          var id='t'+t.id;
+          var el=threadEls[id];
+          if(!el){
+            el=document.createElement('div');
+            el.className='thread-card';
+            el.innerHTML='<div class="tid">Thread '+t.id+'</div><div class="tkps" id="tps'+t.id+'">—</div>';
+            grid.appendChild(el);
+            threadEls[id]=el;
+          }
+          var tpsEl=document.getElementById('tps'+t.id);
+          if(tpsEl) tpsEl.textContent=fmtN(t.kps)+'/s';
+        });
+        break;
+
+      case 'sample':
+        sampleCount++;
+        var row=document.createElement('div');
+        row.className='entry';
+        var m1=document.createElement('span');m1.className='meta';
+        m1.textContent='#'+sampleCount+' T'+m.thread;
+        var k=document.createElement('span');k.className='kkey';
+        k.textContent=m.key;
+        var a=document.createElement('span');a.className='kaddr';
+        a.textContent=m.address;
+        // Copy button
+        var btn=document.createElement('button');btn.className='copy-btn';
+        btn.textContent='Copy';
+        btn.onclick=function(){
+          navigator.clipboard.writeText(m.key).then(function(){
+            btn.textContent='Copied!';btn.classList.add('copied');
+            setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},1500);
+          }).catch(function(){});
+        };
+        row.append(m1,k,a,btn);
+        var wrap=$('samples');
+        wrap.appendChild(row);
+        wrap.parentNode.scrollTop=wrap.parentNode.scrollHeight;
+        while(wrap.children.length>40) wrap.removeChild(wrap.firstChild);
+        break;
+
+      case 'found':
+        $('dot').className='dot found';
+        $('msg').innerHTML='<strong>🎉 Key recovered!</strong>';
+        $('found').className='found show';
+        $('key').textContent='Key: '+m.key+'\nAddress: '+(m.address||'(see found_key.txt)');
+        if(!notified&&'Notification' in window){
+          notified=true;
+          if(Notification.permission==='granted') new Notification('BTC Puzzle Solved!',{body:'Private key found!'});
+        }
+        break;
     }
   };
-  ws.onerror = () => {/* let onclose handle */};
-  ws.onclose = () => {
-    $('dot').className = 'dot dead';
-    $('msg').innerHTML = '<strong>Disconnected. Reconnecting…</strong>';
-    $('status').textContent = '—';
-    setTimeout(connect, backoff);
-    backoff = Math.min(backoff*2, 8000);
+  ws.onerror=function(){/* onclose handles */};
+  ws.onclose=function(){
+    $('dot').className='dot dead';
+    $('msg').innerHTML='<strong>Disconnected. Reconnecting…</strong>';
+    setTimeout(connect,backoff);
+    backoff=Math.min(backoff*2,8000);
   };
 }
+
+// Request notification permission early
+if('Notification' in window&&Notification.permission==='default') Notification.requestPermission();
+
 connect();
 </script>
 </body>
