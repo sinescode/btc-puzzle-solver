@@ -1,13 +1,12 @@
 use bitcoin::{Address, Network, PublicKey as BtcPublicKey};
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use futures::{SinkExt, StreamExt};
-use k256::{AffinePoint, ProjectivePoint, Scalar};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::{BatchNormalize, PrimeField};
-use parking_lot::RwLock;
+use k256::{AffinePoint, ProjectivePoint, Scalar};
+use rand::seq::SliceRandom;
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
-use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -20,17 +19,21 @@ use warp::ws::Message;
 use warp::Filter;
 
 const TARGET_ADDRESS: &str = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU";
-const RANGE_START: u128 = 0x400000000000000000;
-const RANGE_END: u128 = 0x7fffffffffffffffff;
-const BATCH_SIZE: u64 = 1000;
+const RANGE_START: u128 = 1u128 << 70;
+const RANGE_END: u128 = (1u128 << 71) - 1;
+const BATCH_SIZE: usize = 8192;
 const OUTPUT_FILE: &str = "found_key.txt";
+const SAMPLE_EVERY: u64 = 50_000_000;
+const RELAY_ADDR: &str = "127.0.0.1:3030";
 
 #[derive(Clone)]
 struct Stats {
     total_checked: Arc<AtomicU64>,
     keys_per_second: Arc<AtomicU64>,
+    kps_window: Arc<AtomicU64>,
     running: Arc<AtomicBool>,
-    found_key: Arc<RwLock<Option<String>>>,
+    found_key: Arc<parking_lot::RwLock<Option<String>>>,
+    found_event_sent: Arc<AtomicBool>,
     start_time: Instant,
 }
 
@@ -39,8 +42,10 @@ impl Stats {
         Self {
             total_checked: Arc::new(AtomicU64::new(0)),
             keys_per_second: Arc::new(AtomicU64::new(0)),
+            kps_window: Arc::new(AtomicU64::new(0)),
             running: Arc::new(AtomicBool::new(true)),
-            found_key: Arc::new(RwLock::new(None)),
+            found_key: Arc::new(parking_lot::RwLock::new(None)),
+            found_event_sent: Arc::new(AtomicBool::new(false)),
             start_time: Instant::now(),
         }
     }
@@ -55,6 +60,14 @@ impl Stats {
 
     fn set_kps(&self, kps: u64) {
         self.keys_per_second.store(kps, Ordering::Relaxed);
+    }
+
+    fn add_kps(&self, n: u64) {
+        self.kps_window.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn collect_kps_and_reset(&self) -> u64 {
+        self.kps_window.swap(0, Ordering::Relaxed)
     }
 
     fn kps(&self) -> u64 {
@@ -74,15 +87,22 @@ impl Stats {
     }
 
     fn found(&self, key_hex: String) {
+        if self.found_event_sent.swap(true, Ordering::SeqCst) {
+            return;
+        }
         *self.found_key.write() = Some(key_hex);
         self.stop();
     }
+
+    fn found_key(&self) -> Option<String> {
+        self.found_key.read().clone()
+    }
 }
 
-fn u128_to_scalar(val: u128) -> Scalar {
+fn u128_to_scalar(val: u128) -> Option<Scalar> {
     let mut bytes = [0u8; 32];
     bytes[16..].copy_from_slice(&val.to_be_bytes());
-    Scalar::from_repr(bytes.into()).unwrap()
+    Scalar::from_repr(bytes.into()).into_option()
 }
 
 fn affine_to_hash160(point: &AffinePoint) -> [u8; 20] {
@@ -95,15 +115,14 @@ fn affine_to_hash160(point: &AffinePoint) -> [u8; 20] {
     let sha = Sha256::digest(&pubkey);
     let mut hasher = Ripemd160::new();
     hasher.update(sha);
-    let mut hash160 = [0u8; 20];
-    hash160.copy_from_slice(hasher.finalize().as_slice());
-    hash160
+    let mut out = [0u8; 20];
+    out.copy_from_slice(hasher.finalize().as_slice());
+    out
 }
 
 fn secret_key_from_u128(val: u128) -> Option<SecretKey> {
-    let bytes = val.to_be_bytes();
     let mut key_bytes = [0u8; 32];
-    key_bytes[16..].copy_from_slice(&bytes);
+    key_bytes[16..].copy_from_slice(&val.to_be_bytes());
     SecretKey::from_slice(&key_bytes).ok()
 }
 
@@ -114,9 +133,21 @@ fn secret_key_to_address(secp: &Secp256k1<bitcoin::secp256k1::All>, key: &Secret
 }
 
 fn save_key(key_hex: &str, address: &str) {
-    let mut f = OpenOptions::new().create(true).append(true).open(OUTPUT_FILE).expect("open file");
-    writeln!(f, "Key: {} Address: {}", key_hex, address).expect("write file");
-    println!("Key saved to {}", OUTPUT_FILE);
+    match OpenOptions::new().create(true).append(true).open(OUTPUT_FILE) {
+        Ok(mut f) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            if let Err(e) = writeln!(f, "Key: {} Address: {}", key_hex, address) {
+                eprintln!("[ERROR] could not write to {}: {}", OUTPUT_FILE, e);
+            } else {
+                println!("Key saved to {}", OUTPUT_FILE);
+            }
+        }
+        Err(e) => eprintln!("[ERROR] could not open {}: {}", OUTPUT_FILE, e),
+    }
 }
 
 fn test_save_key() {
@@ -147,12 +178,13 @@ fn verify_address_generation() {
         let addr = secret_key_to_address(&secp, &key);
         let ok = addr == *expected;
         println!("Test {}: {} - {}", i + 1, if ok { "PASS" } else { "FAIL" }, hex);
-        println!("  got:      {}", addr);
-        println!("  expected: {}", expected);
+        println!(" got: {}", addr);
+        println!(" expected: {}", expected);
+        assert_eq!(addr, *expected, "Test {}: address generation mismatch", i + 1);
     }
 }
 
-fn hash160_from_address(addr: &str) -> [u8; 20] {
+fn hash160_from_address(addr: &str) -> Result<[u8; 20], String> {
     use std::str::FromStr;
     let address = Address::from_str(addr).expect("valid address").assume_checked();
     let script = address.script_pubkey();
@@ -160,82 +192,126 @@ fn hash160_from_address(addr: &str) -> [u8; 20] {
     if script_bytes.len() == 25 && script_bytes[0] == 0x76 && script_bytes[1] == 0xa9 && script_bytes[2] == 0x14 {
         let mut h = [0u8; 20];
         h.copy_from_slice(&script_bytes[3..23]);
-        h
+        Ok(h)
     } else {
-        panic!("target address must be P2PKH");
+        Err("target address must be P2PKH".to_string())
     }
 }
 
-fn solver_worker(stats: Stats, target_hash160: [u8; 20], thread_id: usize, num_threads: usize, tx: broadcast::Sender<String>) {
-    let range_size = RANGE_END - RANGE_START;
-    let mut rng = rand::thread_rng();
-    let random_offset = rng.gen_range(0..range_size);
-    let thread_start = RANGE_START + random_offset;
-    let thread_end = thread_start + range_size / num_threads as u128;
+#[derive(Clone, Copy)]
+struct ThreadSlice {
+    start: u128,
+    end: u128,
+}
 
-    let start_scalar = u128_to_scalar(thread_start);
-    let mut current_point = ProjectivePoint::GENERATOR * &start_scalar;
+fn partition_range(n: usize) -> Vec<ThreadSlice> {
+    let total = RANGE_END - RANGE_START;
+    assert!(n > 0);
+    let mut slices = Vec::with_capacity(n);
+    for i in 0..n {
+        let start = RANGE_START + (total * i as u128) / n as u128;
+        let end = RANGE_START + (total * (i + 1) as u128) / n as u128;
+        slices.push(ThreadSlice { start, end });
+    }
+    slices.shuffle(&mut rand::thread_rng());
+    slices
+}
+
+fn solver_worker(
+    stats: Stats,
+    target_hash160: [u8; 20],
+    thread_id: usize,
+    slice: ThreadSlice,
+    _num_threads: usize,
+    tx: broadcast::Sender<String>,
+) {
+    let thread_start = slice.start;
+    let thread_end = slice.end;
+    if thread_start >= thread_end {
+        return;
+    }
+
+    let start_scalar = match u128_to_scalar(thread_start) {
+        Some(s) => s,
+        None => {
+            eprintln!("[Thread {}] start out of order", thread_id);
+            return;
+        }
+    };
+
+    let mut current_point = ProjectivePoint::GENERATOR * start_scalar;
     let mut current_key = thread_start;
-
     let mut local_count = 0u64;
     let mut last_update = Instant::now();
-    let mut next_sample = 50_000_000u64;
+
+    let mut proj_buf: Vec<ProjectivePoint> = Vec::with_capacity(BATCH_SIZE);
+    let secp = Secp256k1::new();
+
+    let g_affine = ProjectivePoint::GENERATOR.to_affine();
+    let target_first = target_hash160[0];
+
+    let mut next_sample = SAMPLE_EVERY;
 
     while stats.is_running() && current_key < thread_end {
-        let batch_size = ((current_key + BATCH_SIZE as u128).min(thread_end) - current_key) as usize;
-        let batch_start_key = current_key;
+        let remaining = thread_end - current_key;
+        let this_batch = remaining.min(BATCH_SIZE as u128) as usize;
 
-        let mut proj_points = Vec::with_capacity(batch_size);
-        for _ in 0..batch_size {
-            proj_points.push(current_point);
-            current_point += &ProjectivePoint::GENERATOR;
-            current_key += 1;
+        proj_buf.clear();
+        for _ in 0..this_batch {
+            proj_buf.push(current_point);
+            current_point += &g_affine;
         }
+        let batch_start_key = current_key;
+        current_key += this_batch as u128;
 
-        let affine_points = ProjectivePoint::batch_normalize(proj_points.as_slice());
-
+        let affine_points = ProjectivePoint::batch_normalize(&proj_buf[..]);
         for (i, affine) in affine_points.iter().enumerate() {
             let h = affine_to_hash160(affine);
-            if h == target_hash160 {
+            if h[0] == target_first && h == target_hash160 {
                 let found_key = batch_start_key + i as u128;
                 let hex = format!("{:064x}", found_key);
                 println!("[Thread {}] FOUND! Key: {}", thread_id, hex);
-                let secp = Secp256k1::new();
-                let secret_key = secret_key_from_u128(found_key).unwrap();
-                let addr = secret_key_to_address(&secp, &secret_key);
-                save_key(&hex, &addr);
-                stats.found(hex);
+                if let Some(secret_key) = secret_key_from_u128(found_key) {
+                    let addr = secret_key_to_address(&secp, &secret_key);
+                    save_key(&hex, &addr);
+                    stats.found(hex.clone());
+                    let _ = tx.send(format!(
+                        "{{\"type\":\"found\",\"thread\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
+                        thread_id, hex, addr
+                    ));
+                } else {
+                    eprintln!("[Thread {}] hash match but key invalid?!", thread_id);
+                }
                 return;
             }
         }
+        local_count += this_batch as u64;
 
-        local_count += batch_size as u64;
-        let total = stats.total() + local_count;
-
-        if total >= next_sample {
-            let sample_idx = (batch_start_key % batch_size as u128) as usize;
-            if sample_idx < affine_points.len() {
-                let hex = format!("{:064x}", batch_start_key + sample_idx as u128);
-                let secp = Secp256k1::new();
-                let secret_key = secret_key_from_u128(batch_start_key + sample_idx as u128).unwrap();
-                let addr = secret_key_to_address(&secp, &secret_key);
+        let total_seen = stats.total() + local_count;
+        if total_seen >= next_sample && thread_start < thread_end {
+            let progress = current_key.saturating_sub(thread_start).saturating_sub(this_batch as u128);
+            let midpt = thread_start + progress / 2;
+            let hex = format!("{:064x}", midpt);
+            if let Some(sk) = secret_key_from_u128(midpt) {
+                let addr = secret_key_to_address(&secp, &sk);
                 let _ = tx.send(format!(
                     "{{\"type\":\"sample\",\"thread\":{},\"milestone\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
-                    thread_id, next_sample / 50_000_000, hex, addr
+                    thread_id, next_sample / SAMPLE_EVERY, hex, addr
                 ));
             }
-            next_sample += 50_000_000;
+            next_sample += SAMPLE_EVERY;
         }
 
         if last_update.elapsed().as_millis() >= 500 {
             let elapsed = last_update.elapsed().as_secs_f64();
-            stats.set_kps((local_count as f64 / elapsed) as u64);
+            if elapsed > 0.0 {
+                stats.add_kps(local_count);
+            }
             stats.add(local_count);
             local_count = 0;
             last_update = Instant::now();
         }
     }
-
     stats.add(local_count);
 }
 
@@ -243,11 +319,21 @@ async fn stats_broadcaster(stats: Stats, tx: broadcast::Sender<String>) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
     while stats.is_running() {
         interval.tick().await;
-        if !stats.is_running() { break; }
+        if !stats.is_running() {
+            break;
+        }
+        let window = stats.collect_kps_and_reset();
+        let kps = (window as f64 / 0.5) as u64;
+        stats.set_kps(kps);
         let _ = tx.send(format!(
             "{{\"type\":\"stats\",\"total\":{},\"kps\":{},\"elapsed\":{}}}",
-            stats.total(), stats.kps(), stats.elapsed()
+            stats.total(),
+            stats.kps(),
+            stats.elapsed()
         ));
+    }
+    if let Some(key) = stats.found_key() {
+        let _ = tx.send(format!("{{\"type\":\"found\",\"key\":\"{}\"}}", key));
     }
 }
 
@@ -261,27 +347,36 @@ async fn main() {
         return;
     }
 
-    let target_hash160 = hash160_from_address(TARGET_ADDRESS);
+    let target_hash160 = match hash160_from_address(TARGET_ADDRESS) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[ERROR] {}", e);
+            return;
+        }
+    };
     println!("Target hash160: {}", hex::encode(target_hash160));
 
     let stats = Stats::new();
-    let (tx, _) = broadcast::channel::<String>(100);
-
+    let (tx, _) = broadcast::channel::<String>(1024);
     let num_threads = available_parallelism().map(NonZeroUsize::get).unwrap_or(1);
+
+    let slices = partition_range(num_threads);
+
     println!("=== BTC Puzzle Solver ===");
-    println!("Range: {:018x}..{:018x}", RANGE_START, RANGE_END);
+    println!("Range: 0x{:032x}..0x{:032x}", RANGE_START, RANGE_END);
     println!("Target: {} ({})", TARGET_ADDRESS, hex::encode(target_hash160));
     println!("Threads: {}", num_threads);
     println!("Batch size: {}", BATCH_SIZE);
+    println!("Relay bind: {} (override w/ RUST_RELAY_ADDR env)", RELAY_ADDR);
     println!("Run with --verify to verify address generation\n");
 
     let mut handles = Vec::new();
-    for i in 0..num_threads {
+    for (i, slice) in slices.into_iter().enumerate() {
         let s = stats.clone();
         let t = target_hash160;
         let tx_clone = tx.clone();
         handles.push(std::thread::spawn(move || {
-            solver_worker(s, t, i, num_threads, tx_clone);
+            solver_worker(s, t, i, slice, num_threads, tx_clone);
         }));
     }
 
@@ -308,7 +403,11 @@ async fn main() {
     let html = warp::path::end().map(|| warp::reply::html(include_str!("index.html")));
     let routes = html.or(ws_route);
 
-    let addr: std::net::SocketAddr = ([0, 0, 0, 0], 3030).into();
-    println!("Dashboard: http://{}", addr);
-    warp::serve(routes).run(addr).await;
+    let bind: std::net::SocketAddr = std::env::var("RUST_RELAY_ADDR")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| RELAY_ADDR.parse().unwrap());
+
+    println!("Dashboard: http://{}", bind);
+    warp::serve(routes).run(bind).await;
 }
