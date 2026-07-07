@@ -7,6 +7,7 @@ use k256::elliptic_curve::{BatchNormalize, PrimeField};
 use parking_lot::RwLock;
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
+use rand::Rng;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -165,21 +166,23 @@ fn hash160_from_address(addr: &str) -> [u8; 20] {
     }
 }
 
-fn solver_worker(stats: Stats, target_hash160: [u8; 20], thread_id: usize, num_threads: usize) {
+fn solver_worker(stats: Stats, target_hash160: [u8; 20], thread_id: usize, num_threads: usize, tx: broadcast::Sender<String>) {
     let range_size = RANGE_END - RANGE_START;
-    let chunk_size = range_size / num_threads as u128;
-    let start = RANGE_START + chunk_size * thread_id as u128;
-    let end = if thread_id == num_threads - 1 { RANGE_END } else { start + chunk_size };
+    let mut rng = rand::thread_rng();
+    let random_offset = rng.gen_range(0..range_size);
+    let thread_start = RANGE_START + random_offset;
+    let thread_end = thread_start + range_size / num_threads as u128;
 
-    let start_scalar = u128_to_scalar(start);
+    let start_scalar = u128_to_scalar(thread_start);
     let mut current_point = ProjectivePoint::GENERATOR * &start_scalar;
-    let mut current_key = start;
+    let mut current_key = thread_start;
 
     let mut local_count = 0u64;
     let mut last_update = Instant::now();
+    let mut next_sample = 50_000_000u64;
 
-    while stats.is_running() && current_key < end {
-        let batch_size = ((current_key + BATCH_SIZE as u128).min(end) - current_key) as usize;
+    while stats.is_running() && current_key < thread_end {
+        let batch_size = ((current_key + BATCH_SIZE as u128).min(thread_end) - current_key) as usize;
         let batch_start_key = current_key;
 
         let mut proj_points = Vec::with_capacity(batch_size);
@@ -207,6 +210,22 @@ fn solver_worker(stats: Stats, target_hash160: [u8; 20], thread_id: usize, num_t
         }
 
         local_count += batch_size as u64;
+        let total = stats.total() + local_count;
+
+        if total >= next_sample {
+            let sample_idx = (batch_start_key % batch_size as u128) as usize;
+            if sample_idx < affine_points.len() {
+                let hex = format!("{:064x}", batch_start_key + sample_idx as u128);
+                let secp = Secp256k1::new();
+                let secret_key = secret_key_from_u128(batch_start_key + sample_idx as u128).unwrap();
+                let addr = secret_key_to_address(&secp, &secret_key);
+                let _ = tx.send(format!(
+                    "{{\"type\":\"sample\",\"thread\":{},\"milestone\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
+                    thread_id, next_sample / 50_000_000, hex, addr
+                ));
+            }
+            next_sample += 50_000_000;
+        }
 
         if last_update.elapsed().as_millis() >= 500 {
             let elapsed = last_update.elapsed().as_secs_f64();
@@ -260,8 +279,9 @@ async fn main() {
     for i in 0..num_threads {
         let s = stats.clone();
         let t = target_hash160;
+        let tx_clone = tx.clone();
         handles.push(std::thread::spawn(move || {
-            solver_worker(s, t, i, num_threads);
+            solver_worker(s, t, i, num_threads, tx_clone);
         }));
     }
 
@@ -285,7 +305,10 @@ async fn main() {
             })
         });
 
+    let html = warp::path::end().map(|| warp::reply::html(include_str!("index.html")));
+    let routes = html.or(ws_route);
+
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], 3030).into();
     println!("Dashboard: http://{}", addr);
-    warp::serve(ws_route).run(addr).await;
+    warp::serve(routes).run(addr).await;
 }

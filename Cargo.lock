@@ -79,6 +79,7 @@ dependencies = [
  "hex",
  "k256",
  "parking_lot",
+ "rand",
  "ripemd",
  "secp256k1",
  "sha2",
