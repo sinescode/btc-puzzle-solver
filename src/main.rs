@@ -3,6 +3,7 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use futures::{SinkExt, StreamExt};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::BatchNormalize;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use rand::Rng;
 use ripemd::Ripemd160;
@@ -23,7 +24,7 @@ use warp::Filter;
 const TARGET_ADDRESS: &str = "1PWo3JeB9jrGwfHDNpdGK54CRas7fsVzXU";
 const RANGE_START: u128 = 1u128 << 70;
 const RANGE_END: u128 = (1u128 << 71) - 1;
-const RANGE_SIZE: u128 = RANGE_END - RANGE_START;
+const RANGE_SIZE: u128 = RANGE_END - RANGE_START + 1;
 
 /// Each "lottery ticket" is a random starting position followed by a
 /// sequential scan of this many keys.  Small enough that overhead is
@@ -32,11 +33,11 @@ const RANGE_SIZE: u128 = RANGE_END - RANGE_START;
 const SCAN_CHUNK: u128 = 1_048_576; // 2^20
 
 /// Number of projective points accumulated before batch-normalizing.
-const BATCH_SIZE: usize = 65536;
+const BATCH_SIZE: usize = 4096;
 
 const OUTPUT_FILE: &str = "found_key.txt";
 const SAMPLE_EVERY: u64 = 50_000_000;
-const RELAY_ADDR: &str = "127.0.0.1:3030";
+const RELAY_ADDR: &str = "0.0.0.0:3030";
 
 // ── Per-thread stats ───────────────────────────────────────────────────────
 
@@ -102,12 +103,13 @@ impl Stats {
         self.running.load(Ordering::Relaxed)
     }
 
-    fn found(&self, key_hex: String) {
+    fn found(&self, key_hex: String) -> bool {
         if self.found_event_sent.swap(true, Ordering::SeqCst) {
-            return;
+            return false;
         }
         *self.found_key.write() = Some(key_hex);
         self.stop();
+        true
     }
 
     fn found_key(&self) -> Option<String> {
@@ -117,10 +119,12 @@ impl Stats {
 
 // ── Crypto helpers ─────────────────────────────────────────────────────────
 
-fn u128_to_scalar(val: u128) -> Option<Scalar> {
+fn u128_to_scalar(val: u128) -> Scalar {
     let mut bytes = [0u8; 32];
     bytes[16..].copy_from_slice(&val.to_be_bytes());
-    Scalar::from_repr(bytes.into()).into_option()
+    Scalar::from_repr(bytes.into())
+        .into_option()
+        .expect("u128 value is always a valid secp256k1 scalar")
 }
 
 fn affine_to_hash160(point: &AffinePoint) -> [u8; 20] {
@@ -170,7 +174,10 @@ fn save_key(key_hex: &str, address: &str) {
 
 fn hash160_from_address(addr: &str) -> Result<[u8; 20], String> {
     use std::str::FromStr;
-    let address = Address::from_str(addr).expect("valid address").assume_checked();
+    let address = Address::from_str(addr)
+        .map_err(|e| format!("invalid address: {}", e))?
+        .require_network(Network::Bitcoin)
+        .map_err(|e| format!("wrong network: {}", e))?;
     let script = address.script_pubkey();
     let script_bytes = script.as_bytes();
     if script_bytes.len() == 25 && script_bytes[0] == 0x76 && script_bytes[1] == 0xa9 && script_bytes[2] == 0x14 {
@@ -258,11 +265,11 @@ fn solver_worker(
 
     let mut local_count: u64 = 0;
     let mut last_update = Instant::now();
-    let mut next_sample = SAMPLE_EVERY;
+    let mut next_sample = stats.total() + SAMPLE_EVERY;
 
     let chunk_span = SCAN_CHUNK;
     // The maximum start position so we never overflow RANGE_END.
-    let max_start = RANGE_END.saturating_sub(chunk_span);
+    let max_start = RANGE_END.saturating_sub(chunk_span) + 1;
 
     // Main lottery loop: pick random spots, scan, repeat.
     'outer: while stats.is_running() {
@@ -270,10 +277,7 @@ fn solver_worker(
         let chunk_end = chunk_start + chunk_span;
 
         // One fresh scalar multiplication to reach the random start point.
-        let start_scalar = match u128_to_scalar(chunk_start) {
-            Some(s) => s,
-            None => continue, // astronomically unlikely for values in [2^70, 2^71)
-        };
+        let start_scalar = u128_to_scalar(chunk_start);
 
         let mut current_point = ProjectivePoint::GENERATOR * start_scalar;
         let mut current_key = chunk_start;
@@ -292,6 +296,7 @@ fn solver_worker(
                 current_point += &g_affine;
             }
             current_key += this_batch as u128;
+            local_count += this_batch as u64;
 
             let affine_points = ProjectivePoint::batch_normalize(&proj_buf[..]);
             for (i, affine) in affine_points.iter().enumerate() {
@@ -305,21 +310,20 @@ fn solver_worker(
                     );
                     if let Some(secret_key) = secret_key_from_u128(found_key) {
                         let addr = secret_key_to_address(&secp, &secret_key);
-                        save_key(&hex, &addr);
-                        stats.found(hex.clone());
-                        let _ = tx.send(format!(
-                            "{{\"type\":\"found\",\"thread\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
-                            thread_id, hex, addr
-                        ));
-                        shutdown_tx.send_replace(true);
+                        if stats.found(hex.clone()) {
+                            save_key(&hex, &addr);
+                            let _ = tx.send(format!(
+                                "{{\"type\":\"found\",\"thread\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
+                                thread_id, hex, addr
+                            ));
+                            shutdown_tx.send_replace(true);
+                        }
                     } else {
                         eprintln!("[Thread {}] hash160 match but invalid secret key?!", thread_id);
                     }
                     break 'outer;
                 }
             }
-
-            local_count += this_batch as u64;
 
             // ── Sample key emission (every SAMPLE_EVERY keys globally) ──
             let total_seen = stats.total() + local_count;
@@ -409,11 +413,6 @@ async fn stats_broadcaster(
             thread_parts.join(",")
         ));
     }
-
-    // Send final found event if the key was discovered.
-    if let Some(key) = stats.found_key() {
-        let _ = tx.send(format!("{{\"type\":\"found\",\"key\":\"{}\"}}", key));
-    }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -427,6 +426,13 @@ async fn main() {
         println!("\nAll verifications complete.");
         return;
     }
+
+    assert!(
+        SCAN_CHUNK <= RANGE_SIZE,
+        "SCAN_CHUNK ({}) exceeds RANGE_SIZE ({})",
+        SCAN_CHUNK,
+        RANGE_SIZE
+    );
 
     let target_hash160 = match hash160_from_address(TARGET_ADDRESS) {
         Ok(h) => h,
@@ -446,7 +452,7 @@ async fn main() {
         (0..num_threads).map(|_| PerThreadStats::new()).collect(),
     );
     let threads_active = Arc::new(AtomicU64::new(num_threads as u64));
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let (tx, _) = broadcast::channel::<String>(1024);
 
     println!("=== BTC Puzzle Solver ===");

@@ -241,7 +241,8 @@ function connect(){
           if(!el){
             el=document.createElement('div');
             el.className='thread-card';
-            el.innerHTML='<div class="tid">Thread '+t.id+'</div><div class="tkps" id="tps'+t.id+'">—</div>';
+            el.innerHTML='<div class="tid"></div><div class="tkps" id="tps'+t.id+'">—</div>';
+            el.querySelector('.tid').textContent='Thread '+t.id;
             grid.appendChild(el);
             threadEls[id]=el;
           }
