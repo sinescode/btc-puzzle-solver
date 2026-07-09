@@ -155,7 +155,11 @@ fn secret_key_to_address(secp: &Secp256k1<bitcoin::secp256k1::All>, key: &Secret
 }
 
 fn save_key(key_hex: &str, address: &str) {
-    match OpenOptions::new().create(true).append(true).open(OUTPUT_FILE) {
+    save_key_to(OUTPUT_FILE, key_hex, address);
+}
+
+fn save_key_to(path: &str, key_hex: &str, address: &str) {
+    match OpenOptions::new().create(true).append(true).open(path) {
         Ok(mut f) => {
             #[cfg(unix)]
             {
@@ -163,12 +167,12 @@ fn save_key(key_hex: &str, address: &str) {
                 let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
             }
             if let Err(e) = writeln!(f, "Key: {} Address: {}", key_hex, address) {
-                eprintln!("[ERROR] could not write to {}: {}", OUTPUT_FILE, e);
+                eprintln!("[ERROR] could not write to {}: {}", path, e);
             } else {
-                println!("Key saved to {}", OUTPUT_FILE);
+                println!("Key saved to {}", path);
             }
         }
-        Err(e) => eprintln!("[ERROR] could not open {}: {}", OUTPUT_FILE, e),
+        Err(e) => eprintln!("[ERROR] could not open {}: {}", path, e),
     }
 }
 
@@ -193,15 +197,40 @@ fn hash160_from_address(addr: &str) -> Result<[u8; 20], String> {
 
 fn test_save_key() {
     use std::fs;
-    let _ = fs::remove_file(OUTPUT_FILE);
-    save_key("0000000000000000000000000000000000000000000000000000000000000001", "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH");
-    save_key("0000000000000000000000000000000000000000000000000000000000000002", "1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP");
-    let content = fs::read_to_string(OUTPUT_FILE).expect("read file");
+    // Use a temp path so --verify never touches a real found_key.txt.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "btc-puzzle-solver-save_key-test-{}-{}.txt",
+        std::process::id(),
+        nanos
+    ));
+    let path_str = path.to_str().expect("temp path is valid UTF-8");
+    let _ = fs::remove_file(&path);
+    save_key_to(
+        path_str,
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH",
+    );
+    save_key_to(
+        path_str,
+        "0000000000000000000000000000000000000000000000000000000000000002",
+        "1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP",
+    );
+    let content = fs::read_to_string(&path).expect("read temp file");
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0], "Key: 0000000000000000000000000000000000000000000000000000000000000001 Address: 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH");
-    assert_eq!(lines[1], "Key: 0000000000000000000000000000000000000000000000000000000000000002 Address: 1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP");
-    fs::remove_file(OUTPUT_FILE).ok();
+    assert_eq!(
+        lines[0],
+        "Key: 0000000000000000000000000000000000000000000000000000000000000001 Address: 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"
+    );
+    assert_eq!(
+        lines[1],
+        "Key: 0000000000000000000000000000000000000000000000000000000000000002 Address: 1cMh228HTCiwS8ZsaakH8A8wze1JR5ZsP"
+    );
+    fs::remove_file(&path).ok();
     println!("save_key test: PASS");
 }
 
@@ -283,7 +312,8 @@ fn solver_worker(
         let mut current_key = chunk_start;
 
         // Sequential scan within the chunk (fast path).
-        while current_key < chunk_end {
+        // Check is_running each batch so peers stop soon after a find.
+        while current_key < chunk_end && stats.is_running() {
             let remaining = chunk_end - current_key;
             let this_batch = remaining.min(BATCH_SIZE as u128) as usize;
 
@@ -308,18 +338,24 @@ fn solver_worker(
                         "[Thread {}] 🎉 FOUND! Key: {}  (offset {} in chunk @ {})",
                         thread_id, hex, i, chunk_start
                     );
-                    if let Some(secret_key) = secret_key_from_u128(found_key) {
-                        let addr = secret_key_to_address(&secp, &secret_key);
-                        if stats.found(hex.clone()) {
-                            save_key(&hex, &addr);
-                            let _ = tx.send(format!(
-                                "{{\"type\":\"found\",\"thread\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
-                                thread_id, hex, addr
-                            ));
-                            shutdown_tx.send_replace(true);
-                        }
-                    } else {
-                        eprintln!("[Thread {}] hash160 match but invalid secret key?!", thread_id);
+                    // Always stop globally and persist hex — even if address
+                    // derivation fails (should be impossible for in-range keys).
+                    let addr = secret_key_from_u128(found_key)
+                        .map(|sk| secret_key_to_address(&secp, &sk));
+                    if addr.is_none() {
+                        eprintln!(
+                            "[Thread {}] hash160 match but secret key derivation failed; saving raw hex",
+                            thread_id
+                        );
+                    }
+                    if stats.found(hex.clone()) {
+                        let addr_str = addr.as_deref().unwrap_or("(derivation failed)");
+                        save_key(&hex, addr_str);
+                        let _ = tx.send(format!(
+                            "{{\"type\":\"found\",\"thread\":{},\"key\":\"{}\",\"address\":\"{}\"}}",
+                            thread_id, hex, addr_str
+                        ));
+                        shutdown_tx.send_replace(true);
                     }
                     break 'outer;
                 }
